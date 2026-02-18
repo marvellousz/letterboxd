@@ -5,3 +5,4 @@ sentence-transformers>=3.0.1
 torch>=2.2.0
 numpy>=1.26.4,<2
 cloudscraper>=1.2.71
+python-dotenv>=1.0.1

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+
+from tmdb_client import TMDbClient
 
 
 @dataclass
@@ -16,6 +18,8 @@ class Recommendation:
     cf_score: float
     vibe_similarity: float
     why: str
+    overview: Optional[str] = None
+    poster_url: Optional[str] = None
 
 
 def _safe_norm(vector: np.ndarray) -> float:
@@ -45,6 +49,8 @@ def _build_overview_text(df: pd.DataFrame) -> pd.Series:
 def refine_with_vibe(
     candidates_df: pd.DataFrame,
     user_history_df: pd.DataFrame,
+    tmdb_ids: Dict[int, int],
+    tmdb_client: Optional[TMDbClient] = None,
     top_n: int = 5,
 ) -> List[Recommendation]:
     """Refine candidate list by comparing semantic vibe to highly-rated films."""
@@ -98,6 +104,18 @@ def refine_with_vibe(
             f"({row['vibe_similarity']:.2f}) with your top-rated films."
         )
 
+        overview = None
+        poster_url = None
+        
+        if tmdb_client and row["movieId"] in tmdb_ids:
+            tmdb_id = tmdb_ids[row["movieId"]]
+            try:
+                details = tmdb_client.get_movie_details(tmdb_id)
+                overview = details.get("overview")
+                poster_url = tmdb_client.get_poster_url(details.get("poster_path"))
+            except Exception as e:
+                print(f"    Warning: Could not fetch TMDb details for {title_full}: {e}")
+
         recommendations.append(
             Recommendation(
                 title=row.get("title_clean", title_full),
@@ -106,6 +124,8 @@ def refine_with_vibe(
                 cf_score=float(row["cf_score"]),
                 vibe_similarity=float(row["vibe_similarity"]),
                 why=why,
+                overview=overview,
+                poster_url=poster_url,
             )
         )
 

@@ -33,3 +33,6 @@ Thumbs.db
 # huggingface cache
 .cache/
 models/
+
+# secrets
+.env

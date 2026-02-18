@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import requests
 
-MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
+from tmdb_client import TMDbClient
+
+MOVIELENS_URL = "http://files.grouplens.org/datasets/movielens/ml-latest.zip"
 
 
 @dataclass
@@ -17,23 +19,28 @@ class ModelArtifacts:
     ratings: pd.DataFrame
     user_history: pd.DataFrame
     candidates: pd.DataFrame
+    tmdb_ids: Dict[int, int]  # Mapping from MovieLens ID -> TMDb ID
 
 
 def _download_movielens(data_dir: str = "data") -> Path:
     data_path = Path(data_dir)
     data_path.mkdir(parents=True, exist_ok=True)
-    extract_dir = data_path / "ml-latest-small"
+    extract_dir = data_path / "ml-latest"
 
     if (extract_dir / "ratings.csv").exists() and (extract_dir / "movies.csv").exists():
         return extract_dir
 
-    zip_path = data_path / "ml-latest-small.zip"
-    response = requests.get(MOVIELENS_URL, timeout=30)
+    zip_path = data_path / "ml-latest.zip"
+    print(f"  Downloading full MovieLens dataset (~300MB) from {MOVIELENS_URL}...")
+    response = requests.get(MOVIELENS_URL, timeout=120, stream=True)
     response.raise_for_status()
-    zip_path.write_bytes(response.content)
+    
+    with open(zip_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
 
+    print("  Extracting dataset...")
     import zipfile
-
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(data_path)
 
@@ -57,26 +64,21 @@ def _calculate_percentile(rating: float, all_ratings: list) -> float:
 
 
 def _ratings_to_percentiles(ratings_df: pd.DataFrame, user_col: str = "userId") -> pd.DataFrame:
-    """Convert ratings to percentiles for each user (Criticker-style)."""
-    result_rows = []
+    """Convert ratings to percentiles for each user using vectorized operations."""
+    # Filter out users with < 10 ratings to improve quality and performance
+    user_counts = ratings_df[user_col].value_counts()
+    valid_users = user_counts[user_counts >= 10].index
+    filtered_df = ratings_df[ratings_df[user_col].isin(valid_users)].copy()
+
+    # Calculate percentiles (0-99) for each user's ratings
+    filtered_df["percentile"] = (
+        filtered_df.groupby(user_col)["rating"]
+        .rank(pct=True, method="average")
+        .mul(100)
+        .astype(int)
+    ).astype(float)
     
-    for user_id in ratings_df[user_col].unique():
-        user_ratings = ratings_df[ratings_df[user_col] == user_id].copy()
-        all_user_ratings = user_ratings["rating"].tolist()
-        
-        if len(set(all_user_ratings)) < 5:  # Skip users with < 5 distinct ratings
-            continue
-        
-        for _, row in user_ratings.iterrows():
-            percentile = _calculate_percentile(row["rating"], all_user_ratings)
-            result_rows.append({
-                user_col: user_id,
-                "movieId": row["movieId"],
-                "rating": row["rating"],
-                "percentile": percentile
-            })
-    
-    return pd.DataFrame(result_rows)
+    return filtered_df
 
 
 def _calculate_tci(user_percentiles: dict, ml_user_percentiles: dict) -> tuple:
@@ -135,10 +137,19 @@ def _match_user_to_movielens(user_df: pd.DataFrame, movies_df: pd.DataFrame) -> 
     return matched
 
 
+def _get_tmdb_id_for_ml(movie_id: int, links_df: pd.DataFrame) -> Optional[int]:
+    """Get TMDb ID for a MovieLens ID."""
+    match = links_df[links_df["movieId"] == movie_id]
+    if not match.empty and not pd.isna(match.iloc[0]["tmdbId"]):
+        return int(match.iloc[0]["tmdbId"])
+    return None
+
+
 def train_and_recommend(
     user_data_path: str = "user_data.csv",
     top_k: int = 50,
     data_dir: str = "data",
+    tmdb_client: Optional[TMDbClient] = None,
 ) -> ModelArtifacts:
     """Generate recommendations using Criticker-style percentile matching."""
     user_df = pd.read_csv(user_data_path)
@@ -148,6 +159,7 @@ def train_and_recommend(
     ml_dir = _download_movielens(data_dir=data_dir)
     ratings = pd.read_csv(ml_dir / "ratings.csv")
     movies = pd.read_csv(ml_dir / "movies.csv")
+    links = pd.read_csv(ml_dir / "links.csv")
 
     user_history = _match_user_to_movielens(user_df, movies)
     if user_history.empty:
@@ -161,73 +173,120 @@ def train_and_recommend(
         raise ValueError("Need at least 5 distinct ratings for percentile calculation.")
     
     user_percentiles = {}
+    tmdb_mapping: Dict[int, int] = {}
     for _, row in user_history.iterrows():
         movie_id = int(row["movieId"])
         percentile = _calculate_percentile(row["rating"], user_ratings_list)
         user_percentiles[movie_id] = percentile
+        
+        tmdb_id = _get_tmdb_id_for_ml(movie_id, links)
+        if tmdb_id:
+            tmdb_mapping[movie_id] = tmdb_id
     
     # Convert MovieLens ratings to percentiles (sample for performance)
     print("  Computing percentiles for MovieLens users...")
     ml_percentiles_df = _ratings_to_percentiles(ratings, user_col="userId")
     
-    # Calculate TCI with each MovieLens user
-    print("  Finding taste-compatible users...")
-    tci_scores = []
-    min_common = max(3, int(len(user_percentiles) * 0.15))  # At least 15% overlap
+    # Calculate TCI with MovieLens users in bulk
+    print("  Finding taste-compatible users (vectorized)...")
+    # Only consider users who have rated AT LEAST one movie from our history
+    ml_relevant = ml_percentiles_df[ml_percentiles_df["movieId"].isin(user_percentiles.keys())].copy()
     
-    for ml_user_id in ml_percentiles_df["userId"].unique():
-        ml_user_data = ml_percentiles_df[ml_percentiles_df["userId"] == ml_user_id]
-        ml_user_percentiles = dict(zip(ml_user_data["movieId"], ml_user_data["percentile"]))
+    # Map user's own percentiles to this dataframe
+    ml_relevant["user_percentile"] = ml_relevant["movieId"].map(user_percentiles)
+    
+    # Absolute difference
+    ml_relevant["diff"] = (ml_relevant["percentile"] - ml_relevant["user_percentile"]).abs()
+    
+    # Group by user to get TCI and count
+    user_tci = ml_relevant.groupby("userId").agg({
+        "diff": "mean",
+        "movieId": "count"
+    }).rename(columns={"diff": "tci", "movieId": "num_common"})
+    
+    # Filter by minimum overlap
+    min_common = max(5, int(len(user_percentiles) * 0.10))
+    tci_filtered = user_tci[user_tci["num_common"] >= min_common].sort_values("tci")
+    
+    if tci_filtered.empty:
+        raise ValueError("No taste-compatible users found. Try rating more movies or common films.")
         
-        tci, num_common = _calculate_tci(user_percentiles, ml_user_percentiles)
-        
-        if num_common >= min_common and tci != float('inf'):
-            tci_scores.append((ml_user_id, tci, num_common))
+    top_compatible_users = tci_filtered.head(500).index.tolist()
+    print(f"  Found {len(top_compatible_users)} compatible users (best TCI: {tci_filtered.iloc[0]['tci']:.1f})")
     
-    if len(tci_scores) < 10:
-        raise ValueError("Not enough taste-compatible users found. Try rating more films.")
-    
-    # Get top 200 most compatible users (lowest TCI)
-    tci_scores.sort(key=lambda x: (x[1], -x[2]))  # Sort by TCI (lower is better), then by overlap
-    top_compatible_users = [uid for uid, _, _ in tci_scores[:200]]
-    
-    print(f"  Found {len(top_compatible_users)} compatible users (best TCI: {tci_scores[0][1]:.1f})")
-    
-    # Generate PSI (Probable Score Indicator) for unseen movies
+    # Generate PSI (Probable Score Indicator) using group operations
+    print("  Calculating probable scores...")
     seen_movie_ids = set(user_percentiles.keys())
-    all_movie_ids = set(movies["movieId"].astype(int).tolist())
-    candidate_ids = all_movie_ids - seen_movie_ids
     
-    predictions = []
-    compatible_user_data = ml_percentiles_df[ml_percentiles_df["userId"].isin(top_compatible_users)]
+    # Only look at data from our top compatible users
+    relevant_ratings = ml_percentiles_df[
+        (ml_percentiles_df["userId"].isin(top_compatible_users)) & 
+        (~ml_percentiles_df["movieId"].isin(seen_movie_ids))
+    ]
     
-    for movie_id in candidate_ids:
-        # Get percentiles from compatible users who rated this movie
-        movie_percentiles = compatible_user_data[compatible_user_data["movieId"] == movie_id]["percentile"].tolist()
-        
-        if len(movie_percentiles) < 3:  # Need at least 3 ratings
-            continue
-        
-        # Average percentile from compatible users
-        avg_percentile = sum(movie_percentiles) / len(movie_percentiles)
-        
-        # Convert percentile back to user's rating scale (PSI)
-        # Find rating at this percentile in user's distribution
-        sorted_ratings = sorted(user_ratings_list)
-        idx = int((avg_percentile / 100.0) * len(sorted_ratings))
-        idx = min(idx, len(sorted_ratings) - 1)
-        predicted_rating = sorted_ratings[idx]
-        
-        predictions.append((movie_id, predicted_rating, avg_percentile))
+    # Average percentile for each movie
+    movie_stats = relevant_ratings.groupby("movieId").agg({
+        "percentile": ["mean", "count"]
+    })
+    movie_stats.columns = ["avg_percentile", "count"]
     
-    pred_df = pd.DataFrame(predictions, columns=["movieId", "cf_score", "avg_percentile"]).sort_values(
-        by="cf_score", ascending=False
-    )
+    # Filter for movies rated by enough compatible users
+    min_ratings_from_compatible = 3
+    top_candidates = movie_stats[movie_stats["count"] >= min_ratings_from_compatible].copy()
+    
+    # Convert back to user rating scale
+    sorted_user_ratings = sorted(user_ratings_list)
+    def percentile_to_rating(p):
+        idx = int((p / 100.0) * len(sorted_user_ratings))
+        return sorted_user_ratings[min(idx, len(sorted_user_ratings) - 1)]
+    
+    top_candidates["cf_score"] = top_candidates["avg_percentile"].apply(percentile_to_rating)
+    
+    pred_df = top_candidates.reset_index().sort_values("cf_score", ascending=False)
+
+    # TMDb Expansion: Use TMDb recommendations for top-rated films
+    if tmdb_client is not None:
+        print("  Expanding candidates using TMDb...")
+        favorites = user_history.sort_values(by="rating", ascending=False).head(5)
+        tmdb_candidates = []
+        for _, fav in favorites.iterrows():
+            ml_id = int(fav["movieId"])
+            tmdb_id = tmdb_mapping.get(ml_id)
+            if tmdb_id:
+                try:
+                    recs = tmdb_client.get_recommendations(tmdb_id)
+                    for rec in recs:
+                        # Try to find this TMDb movie in MovieLens links
+                        ml_match = links[links["tmdbId"] == rec["id"]]
+                        if not ml_match.empty:
+                            new_ml_id = int(ml_match.iloc[0]["movieId"])
+                            if new_ml_id not in seen_movie_ids:
+                                tmdb_candidates.append({
+                                    "movieId": new_ml_id,
+                                    "cf_score": fav["rating"] * 0.9, # Slight penalty for proximity
+                                    "avg_percentile": 75.0 # Default decent percentile
+                                })
+                                tmdb_mapping[new_ml_id] = rec["id"]
+                except Exception as e:
+                    print(f"    Warning: TMDb lookup failed for {fav['title']}: {e}")
+        
+        if tmdb_candidates:
+            tmdb_df = pd.DataFrame(tmdb_candidates).drop_duplicates(subset=["movieId"])
+            pred_df = pd.concat([pred_df, tmdb_df], ignore_index=True).sort_values(
+                by="cf_score", ascending=False
+            )
 
     candidates = pred_df.head(top_k).merge(movies, on="movieId", how="left")
+    candidates = candidates.sort_values(by="cf_score", ascending=False)
     candidates["title_clean"] = candidates["title"].str.replace(r"\s*\(\d{4}\)$", "", regex=True)
 
-    return ModelArtifacts(movies=movies, ratings=ratings, user_history=user_history, candidates=candidates)
+    return ModelArtifacts(
+        movies=movies, 
+        ratings=ratings, 
+        user_history=user_history, 
+        candidates=candidates,
+        tmdb_ids=tmdb_mapping
+    )
 
 
 if __name__ == "__main__":

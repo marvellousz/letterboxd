@@ -12,9 +12,13 @@ get personalized movie recs based on your letterboxd ratings. uses criticker-sty
 
 ## setup
 
-```bash
-uv venv
 uv pip install -r requirements.txt
+
+# (Optional) Export your TMDb API Key
+export TMDB_API_KEY=your_api_key_here
+
+> [!IMPORTANT]
+> The first run will download the full MovieLens 33M dataset (~300MB) and requires approximately 4GB of RAM for the recommendation engine.
 ```
 
 ## usage
@@ -25,6 +29,9 @@ uv run python main.py
 
 # or pass directly
 uv run python main.py --url https://letterboxd.com/username/
+
+# with TMDb integration (recommended for latest movies)
+uv run python main.py --url https://letterboxd.com/username/ --tmdb-key YOUR_KEY
 
 # debug mode
 uv run python main.py --debug --url https://letterboxd.com/username/
@@ -44,6 +51,7 @@ most rec systems just push popular movies. this one:
 - calculates **taste compatibility index (tci)** like criticker
 - only uses opinions from users who actually match your taste
 - adds semantic layer for genre/vibe preferences
+- **TMDb Integration**: Expands selection to latest releases beyond static MovieLens data.
 
 ## tech stack
 
@@ -65,6 +73,7 @@ most rec systems just push popular movies. this one:
 - `scraper.py` - letterboxd diary scraper
 - `model.py` - criticker-style percentile + tci calculations
 - `recommender.py` - semantic vibe reranking
+- `tmdb_client.py` - TMDb API wrapper for search and metadata
 - `main.py` - pipeline orchestration
 
 no bs, just movies you'll actually like.
