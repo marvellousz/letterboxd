@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -77,7 +77,7 @@ def _build_http_session() -> requests.Session:
 
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
-    rating_node = film_node.select_one("p.poster-viewingdata span.rating")
+    rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
     if rating_node is None:
         return None
     rating_raw = rating_node.get_text(strip=True)
@@ -85,20 +85,40 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
 
 
 def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
+    poster_node = film_node.select_one("div.film-poster")
+    if poster_node is not None:
+        for attr in ("data-film-release-year", "data-year"):
+            year_raw = poster_node.get(attr)
+            if year_raw and re.match(r"^\d{4}$", year_raw.strip()):
+                return int(year_raw.strip())
+
     year_node = film_node.select_one("small.releasedate")
     if year_node is None:
+        title_node = film_node.select_one("img")
+        title_text = title_node.get("alt", "") if title_node else ""
+        title_match = re.search(r"\((\d{4})\)\s*$", title_text)
+        if title_match:
+            return int(title_match.group(1))
         return None
+
     year_text = year_node.get_text(strip=True)
-    if not re.match(r"^\d{4}$", year_text):
-        return None
-    return int(year_text)
+    year_match = re.search(r"(\d{4})", year_text)
+    return int(year_match.group(1)) if year_match else None
 
 
-def _parse_films_page(soup: BeautifulSoup) -> List[FilmRecord]:
+def _extract_title(film_node: BeautifulSoup) -> str:
+    title_node = film_node.select_one("img")
+    title = title_node.get("alt", "").strip() if title_node else ""
+    if not title:
+        return ""
+    return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
+
+
+def _parse_films_page(soup: BeautifulSoup) -> Tuple[List[FilmRecord], int]:
+    films = soup.select("li.poster-container")
     records: List[FilmRecord] = []
-    for film in soup.select("li.poster-container"):
-        title_node = film.select_one("img")
-        title = title_node.get("alt", "").strip() if title_node else ""
+    for film in films:
+        title = _extract_title(film)
         if not title:
             continue
 
@@ -108,7 +128,7 @@ def _parse_films_page(soup: BeautifulSoup) -> List[FilmRecord]:
             continue
 
         records.append(FilmRecord(title=title, year=year, rating=rating))
-    return records
+    return records, len(films)
 
 
 def _validate_response(response: requests.Response, target_url: str) -> None:
@@ -165,8 +185,8 @@ def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_d
         _validate_response(response, page_url)
 
         soup = BeautifulSoup(response.text, "html.parser")
-        page_records = _parse_films_page(soup)
-        if not page_records:
+        page_records, film_count = _parse_films_page(soup)
+        if film_count == 0:
             break
 
         all_records.extend(page_records)
