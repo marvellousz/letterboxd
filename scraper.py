@@ -37,6 +37,16 @@ STAR_MAP = {
 }
 
 
+def _parse_rating_value(raw_rating: str) -> Optional[float]:
+    rating = raw_rating.strip()
+    if not re.match(r"^\d+(?:\.\d+)?$", rating):
+        return None
+
+    value = float(rating)
+    # Letterboxd frequently stores half-star units (e.g. 8 == 4.0 stars).
+    return value / 2 if value > 5 else value
+
+
 def _normalize_films_url(profile_or_films_url: str) -> str:
     cleaned = profile_or_films_url.strip().rstrip("/")
     if not cleaned:
@@ -77,6 +87,12 @@ def _build_http_session() -> requests.Session:
 
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
+    for attr in ("data-owner-rating", "data-rating"):
+        raw_rating = (film_node.get(attr) or "").strip()
+        parsed = _parse_rating_value(raw_rating)
+        if parsed is not None:
+            return parsed
+
     # Modern Letterboxd markup includes owner ratings as numeric half-star values.
     for selector in ("[data-owner-rating]", "[data-rating]"):
         rating_attr_node = film_node.select_one(selector)
@@ -84,9 +100,9 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
             continue
 
         raw_rating = (rating_attr_node.get("data-owner-rating") or rating_attr_node.get("data-rating") or "").strip()
-        if re.match(r"^\d+(?:\.\d+)?$", raw_rating):
-            rating_value = float(raw_rating)
-            return rating_value / 2 if rating_value > 5 else rating_value
+        parsed = _parse_rating_value(raw_rating)
+        if parsed is not None:
+            return parsed
 
     labeled_rating_node = film_node.select_one("[aria-label*='Rated']")
     if labeled_rating_node is not None:
@@ -97,7 +113,7 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
 
     rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
     if rating_node is not None:
-        rating_raw = rating_node.get_text(strip=True)
+        rating_raw = re.sub(r"\s+", "", rating_node.get_text(strip=True))
         mapped_rating = STAR_MAP.get(rating_raw)
         if mapped_rating is not None:
             return mapped_rating
@@ -110,6 +126,10 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     class_match = re.search(r"rated-(\d{1,2})", " ".join(film_node.get("class", [])))
     if class_match:
         return int(class_match.group(1)) / 2
+
+    html_class_match = re.search(r"\brated-(\d{1,2})\b", str(film_node))
+    if html_class_match:
+        return int(html_class_match.group(1)) / 2
 
     return None
 
