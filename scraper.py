@@ -19,7 +19,7 @@ class LetterboxdScrapeError(RuntimeError):
 @dataclass
 class FilmRecord:
     title: str
-    year: int
+    year: Optional[int]
     rating: float
 
 
@@ -85,7 +85,15 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
 
         raw_rating = (rating_attr_node.get("data-owner-rating") or rating_attr_node.get("data-rating") or "").strip()
         if re.match(r"^\d+(?:\.\d+)?$", raw_rating):
-            return float(raw_rating)
+            rating_value = float(raw_rating)
+            return rating_value / 2 if rating_value > 5 else rating_value
+
+    labeled_rating_node = film_node.select_one("[aria-label*='Rated']")
+    if labeled_rating_node is not None:
+        label_text = labeled_rating_node.get("aria-label", "")
+        label_match = re.search(r"rated\s+(\d+(?:\.\d+)?)", label_text, flags=re.IGNORECASE)
+        if label_match:
+            return float(label_match.group(1))
 
     rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
     if rating_node is not None:
@@ -168,7 +176,7 @@ def _parse_films_page(soup: BeautifulSoup) -> Tuple[List[FilmRecord], int]:
 
         year = _extract_year(film)
         rating = _extract_rating(film)
-        if year is None or rating is None:
+        if rating is None:
             continue
 
         records.append(FilmRecord(title=title, year=year, rating=rating))
