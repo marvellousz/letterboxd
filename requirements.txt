@@ -4,4 +4,4 @@ requests>=2.32.3
 scikit-surprise>=1.1.4
 sentence-transformers>=3.0.1
 torch>=2.2.0
-numpy>=1.26.4
+numpy>=1.26.4,<2
