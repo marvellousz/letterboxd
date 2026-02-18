@@ -4,9 +4,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
+from requests import RequestException
 from bs4 import BeautifulSoup
 
 
@@ -37,9 +39,41 @@ STAR_MAP = {
 
 def _normalize_films_url(profile_or_films_url: str) -> str:
     cleaned = profile_or_films_url.strip().rstrip("/")
+    if not cleaned:
+        raise ValueError("Please provide a Letterboxd profile URL or username.")
+
     if not cleaned.startswith("http"):
-        raise ValueError("Please provide a full Letterboxd URL (https://letterboxd.com/<user>/).")
+        username = cleaned.lstrip("@")
+        if not re.match(r"^[A-Za-z0-9_\-]+$", username):
+            raise ValueError("Please provide a full Letterboxd URL (https://letterboxd.com/<user>/).")
+        cleaned = f"https://letterboxd.com/{username}"
+
+    parsed = urlparse(cleaned)
+    if parsed.netloc and "letterboxd.com" not in parsed.netloc:
+        raise ValueError("Please provide a Letterboxd URL on letterboxd.com.")
     return cleaned if cleaned.endswith("/films") else f"{cleaned}/films"
+
+
+def _build_http_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Upgrade-Insecure-Requests": "1",
+        }
+    )
+    return session
 
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
@@ -94,22 +128,40 @@ def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_d
     """Scrape a Letterboxd user's films and ratings into a DataFrame and CSV."""
     films_url = _normalize_films_url(profile_or_films_url)
 
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        }
-    )
+    session = _build_http_session()
+
+    # Prime cookies to reduce anti-bot false positives on direct /page/1 requests.
+    profile_url = f"{films_url.rsplit('/films', maxsplit=1)[0]}/"
+    for warmup_url in (profile_url, f"{films_url}/"):
+        try:
+            warmup_response = session.get(warmup_url, timeout=20)
+        except RequestException as exc:
+            raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
+        _validate_response(warmup_response, warmup_url)
 
     all_records: List[FilmRecord] = []
     page = 1
 
     while True:
         page_url = f"{films_url}/page/{page}/"
-        response = session.get(page_url, timeout=20)
+        try:
+            response = session.get(page_url, timeout=20)
+        except RequestException as exc:
+            raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
+
+        if response.status_code == 403:
+            try:
+                import cloudscraper
+            except ImportError:
+                pass
+            else:
+                scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
+                scraper.trust_env = False
+                try:
+                    response = scraper.get(page_url, timeout=20)
+                except RequestException as exc:
+                    raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
+
         _validate_response(response, page_url)
 
         soup = BeautifulSoup(response.text, "html.parser")
