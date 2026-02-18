@@ -77,6 +77,16 @@ def _build_http_session() -> requests.Session:
 
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
+    # Modern Letterboxd markup includes owner ratings as numeric half-star values.
+    for selector in ("[data-owner-rating]", "[data-rating]"):
+        rating_attr_node = film_node.select_one(selector)
+        if rating_attr_node is None:
+            continue
+
+        raw_rating = (rating_attr_node.get("data-owner-rating") or rating_attr_node.get("data-rating") or "").strip()
+        if re.match(r"^\d+(?:\.\d+)?$", raw_rating):
+            return float(raw_rating)
+
     rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
     if rating_node is not None:
         rating_raw = rating_node.get_text(strip=True)
@@ -93,16 +103,23 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     if class_match:
         return int(class_match.group(1)) / 2
 
-    rating_attr_node = film_node.select_one("[data-rating]")
-    if rating_attr_node is not None:
-        raw_rating = rating_attr_node.get("data-rating", "").strip()
-        if re.match(r"^\d+(?:\.\d+)?$", raw_rating):
-            return float(raw_rating)
-
     return None
 
 
 def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
+    # Newer pages often place year metadata directly on the list item.
+    for attr in ("data-film-release-year", "data-release-year", "data-year"):
+        year_raw = film_node.get(attr)
+        if year_raw and re.match(r"^\d{4}$", year_raw.strip()):
+            return int(year_raw.strip())
+
+    year_attr_node = film_node.select_one("[data-film-release-year], [data-release-year], [data-year]")
+    if year_attr_node is not None:
+        for attr in ("data-film-release-year", "data-release-year", "data-year"):
+            year_raw = year_attr_node.get(attr)
+            if year_raw and re.match(r"^\d{4}$", year_raw.strip()):
+                return int(year_raw.strip())
+
     poster_node = film_node.select_one("div.film-poster, div.poster")
     if poster_node is not None:
         for attr in ("data-film-release-year", "data-year"):
