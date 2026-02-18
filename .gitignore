@@ -1,0 +1,35 @@
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# data
+data/
+*.csv
+*.zip
+
+# models
+*.pth
+*.pkl
+*.joblib
+
+# ide
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# system
+.DS_Store
+Thumbs.db
+
+# huggingface cache
+.cache/
+models/

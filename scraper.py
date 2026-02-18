@@ -61,55 +61,71 @@ def _normalize_films_url(profile_or_films_url: str) -> str:
     parsed = urlparse(cleaned)
     if parsed.netloc and "letterboxd.com" not in parsed.netloc:
         raise ValueError("Please provide a Letterboxd URL on letterboxd.com.")
-    return cleaned if cleaned.endswith("/films") else f"{cleaned}/films"
+    
+    # Use diary view which has ratings in HTML table format
+    if "/films/diary" in cleaned:
+        return cleaned
+    elif "/films" in cleaned:
+        return cleaned.replace("/films", "/films/diary")
+    else:
+        return f"{cleaned}/films/diary"
 
 
-def _build_http_session() -> requests.Session:
-    session = requests.Session()
-    session.trust_env = False
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Upgrade-Insecure-Requests": "1",
-        }
-    )
-    return session
+def _build_http_session():
+    """Build a cloudscraper session to bypass Cloudflare protection."""
+    try:
+        import cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={'browser': 'chrome', 'platform': 'linux', 'mobile': False}
+        )
+        scraper.trust_env = False
+        return scraper
+    except ImportError:
+        # Fallback to regular session if cloudscraper not available
+        session = requests.Session()
+        session.trust_env = False
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+        return session
 
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
+    """Extract rating from a film node (works for both grid and table views)."""
+    # Check for rated-X class pattern (used in diary table view)
+    rating_span = film_node.select_one("span.rating[class*='rated-']")
+    if rating_span:
+        classes = rating_span.get("class", [])
+        for cls in classes:
+            if cls.startswith("rated-"):
+                try:
+                    rating_value = int(cls.replace("rated-", ""))
+                    return rating_value / 2.0  # Convert to 5-star scale
+                except (ValueError, AttributeError):
+                    pass
+    
+    # Legacy extraction methods for older page formats
     for attr in ("data-owner-rating", "data-rating"):
         raw_rating = (film_node.get(attr) or "").strip()
         parsed = _parse_rating_value(raw_rating)
         if parsed is not None:
             return parsed
 
-    # Modern Letterboxd markup includes owner ratings as numeric half-star values.
     for selector in ("[data-owner-rating]", "[data-rating]"):
         rating_attr_node = film_node.select_one(selector)
         if rating_attr_node is None:
             continue
-
         raw_rating = (rating_attr_node.get("data-owner-rating") or rating_attr_node.get("data-rating") or "").strip()
         parsed = _parse_rating_value(raw_rating)
         if parsed is not None:
             return parsed
-
-    labeled_rating_node = film_node.select_one("[aria-label*='Rated']")
-    if labeled_rating_node is not None:
-        label_text = labeled_rating_node.get("aria-label", "")
-        label_match = re.search(r"rated\s+(\d+(?:\.\d+)?)", label_text, flags=re.IGNORECASE)
-        if label_match:
-            return float(label_match.group(1))
 
     rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
     if rating_node is not None:
@@ -127,15 +143,20 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     if class_match:
         return int(class_match.group(1)) / 2
 
-    html_class_match = re.search(r"\brated-(\d{1,2})\b", str(film_node))
-    if html_class_match:
-        return int(html_class_match.group(1)) / 2
-
     return None
 
 
 def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
-    # Newer pages often place year metadata directly on the list item.
+    """Extract year from a film node (works for both grid and table views)."""
+    # For diary table view, look for release date links
+    year_link = film_node.select_one("td.td-released a, td.td-film-details small a")
+    if year_link:
+        year_text = year_link.get_text(strip=True)
+        year_match = re.search(r"(\d{4})", year_text)
+        if year_match:
+            return int(year_match.group(1))
+    
+    # Legacy extraction for grid view
     for attr in ("data-film-release-year", "data-release-year", "data-year"):
         year_raw = film_node.get(attr)
         if year_raw and re.match(r"^\d{4}$", year_raw.strip()):
@@ -170,6 +191,15 @@ def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
 
 
 def _extract_title(film_node: BeautifulSoup) -> str:
+    """Extract title from a film node (works for both grid and table views)."""
+    # For diary table view, look for title in headline or link
+    title_link = film_node.select_one("h3.headline-3 a, td.td-film-details h3 a, a.frame")
+    if title_link:
+        title = title_link.get_text(strip=True)
+        if title:
+            return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
+    
+    # Legacy extraction for grid view
     title_node = film_node.select_one("img")
     title = title_node.get("alt", "").strip() if title_node else ""
     if not title:
@@ -184,22 +214,45 @@ def _extract_title(film_node: BeautifulSoup) -> str:
     return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
 
 
-def _parse_films_page(soup: BeautifulSoup) -> Tuple[List[FilmRecord], int]:
-    films = soup.select("li.poster-container, li.posteritem")
+def _parse_films_page(soup: BeautifulSoup, debug: bool = False) -> Tuple[List[FilmRecord], int]:
+    """Parse a films page and extract rated films."""
+    # Try diary table view first (modern Letterboxd)
+    films = soup.select("tr.diary-entry-row")
+    is_diary_view = len(films) > 0
+    
+    # Fallback to grid view (older format)
+    if not films:
+        films = soup.select("li.poster-container, li.posteritem")
     if not films:
         films = soup.select("ul.poster-list > li")
+    
+    if debug:
+        view_type = "diary table" if is_diary_view else "grid"
+        print(f"[DEBUG] Found {len(films)} film containers ({view_type} view)")
+    
     records: List[FilmRecord] = []
+    skipped_no_title = 0
+    skipped_no_rating = 0
+    
     for film in films:
         title = _extract_title(film)
         if not title:
+            skipped_no_title += 1
             continue
 
         year = _extract_year(film)
         rating = _extract_rating(film)
         if rating is None:
+            skipped_no_rating += 1
+            if debug:
+                print(f"[DEBUG] Skipped film without rating: {title}")
             continue
 
         records.append(FilmRecord(title=title, year=year, rating=rating))
+    
+    if debug:
+        print(f"[DEBUG] Parsed {len(records)} rated films, {skipped_no_title} without title, {skipped_no_rating} without rating")
+    
     return records, len(films)
 
 
@@ -216,48 +269,28 @@ def _validate_response(response: requests.Response, target_url: str) -> None:
         raise LetterboxdScrapeError(f"Letterboxd page not found: {target_url}")
 
 
-def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_data.csv") -> pd.DataFrame:
+def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_data.csv", debug: bool = False) -> pd.DataFrame:
     """Scrape a Letterboxd user's films and ratings into a DataFrame and CSV."""
     films_url = _normalize_films_url(profile_or_films_url)
 
     session = _build_http_session()
 
-    # Prime cookies to reduce anti-bot false positives on direct /page/1 requests.
-    profile_url = f"{films_url.rsplit('/films', maxsplit=1)[0]}/"
-    for warmup_url in (profile_url, f"{films_url}/"):
-        try:
-            warmup_response = session.get(warmup_url, timeout=20)
-        except RequestException as exc:
-            raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
-        _validate_response(warmup_response, warmup_url)
-
     all_records: List[FilmRecord] = []
     page = 1
 
     while True:
-        page_url = f"{films_url}/page/{page}/"
+        page_url = f"{films_url}/page/{page}/" if page > 1 else f"{films_url}/"
         try:
             response = session.get(page_url, timeout=20)
         except RequestException as exc:
             raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
 
-        if response.status_code == 403:
-            try:
-                import cloudscraper
-            except ImportError:
-                pass
-            else:
-                scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
-                scraper.trust_env = False
-                try:
-                    response = scraper.get(page_url, timeout=20)
-                except RequestException as exc:
-                    raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
-
         _validate_response(response, page_url)
 
         soup = BeautifulSoup(response.text, "html.parser")
-        page_records, film_count = _parse_films_page(soup)
+        page_records, film_count = _parse_films_page(soup, debug=debug)
+        if debug:
+            print(f"[DEBUG] Page {page}: {film_count} film containers, {len(page_records)} with ratings")
         if film_count == 0:
             break
 

@@ -51,37 +51,36 @@ def refine_with_vibe(
     candidates = candidates_df.copy().reset_index(drop=True)
 
     favorites = user_history_df.sort_values(by="rating", ascending=False).head(10)
-    favorite_titles = favorites["title_user"].fillna("").tolist()
-
+    
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
     candidate_texts = _build_overview_text(candidates).tolist()
     candidate_embeddings = model.encode(candidate_texts, convert_to_numpy=True)
 
-    if favorite_titles:
-        favorite_prompts = [f"Movie with philosophical depth or cyberpunk/noir mood: {title}" for title in favorite_titles]
+    # Build user profile from their favorite films
+    if not favorites.empty:
+        # Get genres from favorites to personalize recommendations
+        favorite_genres = favorites.get("genres", pd.Series([""] * len(favorites))).fillna("")
+        favorite_titles = favorites["title_user"].fillna("").tolist()
+        
+        # Create prompts from actual user favorites (no hardcoded bias)
+        favorite_prompts = [f"Movie: {title}. Genres: {genre}" 
+                          for title, genre in zip(favorite_titles, favorite_genres)]
         favorite_embeddings = model.encode(favorite_prompts, convert_to_numpy=True)
         user_centroid = favorite_embeddings.mean(axis=0)
     else:
-        user_centroid = model.encode(
-            ["philosophical depth, cyberpunk cityscapes, noir atmosphere, existential themes"],
-            convert_to_numpy=True,
-        )[0]
+        # Fallback to generic if no favorites
+        user_centroid = model.encode(["highly rated movies"], convert_to_numpy=True)[0]
 
-    vibe_query = model.encode(
-        ["philosophical depth, cyberpunk/noir tone, existential conflict, futuristic melancholy"],
-        convert_to_numpy=True,
-    )[0]
-
-    sim_user = _cosine_similarity(candidate_embeddings, user_centroid)
-    sim_query = _cosine_similarity(candidate_embeddings, vibe_query)
-    vibe_similarity = 0.65 * sim_user + 0.35 * sim_query
+    # Use only user preferences for vibe similarity (no hardcoded theme)
+    vibe_similarity = _cosine_similarity(candidate_embeddings, user_centroid)
 
     cf = candidates["cf_score"].to_numpy(dtype=float)
     cf_norm = (cf - cf.min()) / (cf.max() - cf.min() + 1e-9)
     vibe_norm = (vibe_similarity - vibe_similarity.min()) / (vibe_similarity.max() - vibe_similarity.min() + 1e-9)
 
-    final_score = 0.55 * cf_norm + 0.45 * vibe_norm
+    # Give more weight to vibe similarity for better personalization
+    final_score = 0.40 * cf_norm + 0.60 * vibe_norm
 
     candidates["vibe_similarity"] = vibe_similarity
     candidates["final_score"] = final_score

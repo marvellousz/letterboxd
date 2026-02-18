@@ -9,10 +9,10 @@ from recommender import refine_with_vibe
 from scraper import LetterboxdScrapeError, scrape_letterboxd_films
 
 
-def run_pipeline(letterboxd_url: str, output_csv: str = "user_data.csv") -> int:
+def run_pipeline(letterboxd_url: str, output_csv: str = "user_data.csv", debug: bool = False) -> int:
     try:
         print("[1/4] Scraping Letterboxd films...")
-        user_df = scrape_letterboxd_films(letterboxd_url, output_csv=output_csv)
+        user_df = scrape_letterboxd_films(letterboxd_url, output_csv=output_csv, debug=debug)
         print(f"  Collected {len(user_df)} rated films.")
 
         print("[2/4] Training collaborative filtering model...")
@@ -55,6 +55,7 @@ def main() -> int:
     )
     parser.add_argument("--url", help="Letterboxd profile URL")
     parser.add_argument("--output", default="user_data.csv", help="Path for scraped user CSV")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output")
     args = parser.parse_args()
 
     letterboxd_url: Optional[str] = args.url
@@ -65,7 +66,7 @@ def main() -> int:
         print("No URL provided.", file=sys.stderr)
         return 1
 
-    return run_pipeline(letterboxd_url=letterboxd_url, output_csv=args.output)
+    return run_pipeline(letterboxd_url=letterboxd_url, output_csv=args.output, debug=args.debug)
 
 
 if __name__ == "__main__":
