@@ -78,14 +78,32 @@ def _build_http_session() -> requests.Session:
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     rating_node = film_node.select_one("p.poster-viewingdata span.rating, span.rating")
-    if rating_node is None:
-        return None
-    rating_raw = rating_node.get_text(strip=True)
-    return STAR_MAP.get(rating_raw)
+    if rating_node is not None:
+        rating_raw = rating_node.get_text(strip=True)
+        mapped_rating = STAR_MAP.get(rating_raw)
+        if mapped_rating is not None:
+            return mapped_rating
+
+        class_names = " ".join(rating_node.get("class", []))
+        class_match = re.search(r"rated-(\d{1,2})", class_names)
+        if class_match:
+            return int(class_match.group(1)) / 2
+
+    class_match = re.search(r"rated-(\d{1,2})", " ".join(film_node.get("class", [])))
+    if class_match:
+        return int(class_match.group(1)) / 2
+
+    rating_attr_node = film_node.select_one("[data-rating]")
+    if rating_attr_node is not None:
+        raw_rating = rating_attr_node.get("data-rating", "").strip()
+        if re.match(r"^\d+(?:\.\d+)?$", raw_rating):
+            return float(raw_rating)
+
+    return None
 
 
 def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
-    poster_node = film_node.select_one("div.film-poster")
+    poster_node = film_node.select_one("div.film-poster, div.poster")
     if poster_node is not None:
         for attr in ("data-film-release-year", "data-year"):
             year_raw = poster_node.get(attr)
@@ -110,12 +128,21 @@ def _extract_title(film_node: BeautifulSoup) -> str:
     title_node = film_node.select_one("img")
     title = title_node.get("alt", "").strip() if title_node else ""
     if not title:
+        linked_poster = film_node.select_one("[data-target-link]")
+        if linked_poster is not None:
+            target_link = linked_poster.get("data-target-link", "")
+            slug = target_link.strip("/").split("/")[-1]
+            if slug:
+                title = slug.replace("-", " ").title()
+    if not title:
         return ""
     return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
 
 
 def _parse_films_page(soup: BeautifulSoup) -> Tuple[List[FilmRecord], int]:
-    films = soup.select("li.poster-container")
+    films = soup.select("li.poster-container, li.posteritem")
+    if not films:
+        films = soup.select("ul.poster-list > li")
     records: List[FilmRecord] = []
     for film in films:
         title = _extract_title(film)
