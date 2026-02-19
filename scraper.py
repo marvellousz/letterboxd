@@ -61,15 +61,20 @@ def _normalize_films_url(profile_or_films_url: str) -> str:
     parsed = urlparse(cleaned)
     if parsed.netloc and "letterboxd.com" not in parsed.netloc:
         raise ValueError("Please provide a Letterboxd URL on letterboxd.com.")
+
+    # Support common typo or combined paths
+    if "/films/diary" in cleaned:
+        cleaned = cleaned.replace("/films/diary", "/diary")
     
-    # Prefer /films/ view as it includes all rated movies even if not logged in diary
-    if "/films" in cleaned:
+    # Prioritize /diary/ if explicitly provided by user
+    if "/diary" in cleaned:
         return cleaned if cleaned.endswith("/") else f"{cleaned}/"
-    elif "/diary" in cleaned:
-        # If user gave /diary, use it, but /films is generally better for missing entries
+    # Otherwise check for /films/
+    elif "/films" in cleaned:
         return cleaned if cleaned.endswith("/") else f"{cleaned}/"
     else:
-        return f"{cleaned}/films/"
+        # Default to /diary/ as it's cleaner to parse and more reliable
+        return f"{cleaned}/diary/"
 
 
 def _build_http_session():
@@ -80,7 +85,7 @@ def _build_http_session():
             "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": "en-US,en;q=1.0",
         "Referer": "https://letterboxd.com/",
         "DNT": "1",
         "Connection": "keep-alive",
@@ -89,6 +94,9 @@ def _build_http_session():
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
     }
 
     try:
@@ -111,7 +119,20 @@ def _build_http_session():
 
 def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     """Extract rating from a film node (works for both grid and table views)."""
-    # Try extracting from common rating classes or structures
+    # 1. Check classes on the node itself (common in grid view)
+    node_classes = film_node.get("class", [])
+    if not isinstance(node_classes, list):
+        node_classes = [node_classes]
+    for cls in node_classes:
+        clean_cls = str(cls).strip("-")
+        if clean_cls.startswith("rated-"):
+            try:
+                rating_value = int(clean_cls.replace("rated-", ""))
+                return rating_value / 2.0
+            except (ValueError, AttributeError):
+                pass
+
+    # 2. Try extracting from common rating classes or structures inside
     rating_node = film_node.select_one(
         "span.rating[class*='rated-'], td.col-rating span.rating, div.rating-green span.rating, p.poster-viewingdata span.rating, span.rating, .rating-stars .rating"
     )
@@ -128,13 +149,13 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
                     return rating_value / 2.0
                 except (ValueError, AttributeError):
                     pass
-        
+
         # Try text-based extraction (stars)
         rating_raw = re.sub(r"\s+", "", rating_node.get_text(strip=True))
         mapped_rating = STAR_MAP.get(rating_raw)
         if mapped_rating is not None:
             return mapped_rating
-            
+
     # Check parent or siblings for rating data
     parent_rating = film_node.select_one(".viewing-rating span.rating")
     if parent_rating:
@@ -174,7 +195,7 @@ def _extract_year(film_node: BeautifulSoup) -> Optional[int]:
                 return int(match.group(1))
         except (ValueError, TypeError):
             pass
-    
+
     # Try data attributes on node itself or children
     for attr in ("data-film-release-year", "data-item-release-year", "data-release-year", "data-year"):
         # Check node itself
@@ -202,10 +223,10 @@ def _extract_title(film_node: BeautifulSoup) -> str:
             title = title_link.get("alt", "").strip()
         else:
             title = title_link.get_text(strip=True)
-        
+
         if title:
             return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
-    
+
     # Fallback to data-item-name
     name_node = film_node.select_one("[data-item-name]")
     if name_node:
@@ -221,24 +242,24 @@ def _parse_films_page(soup: BeautifulSoup, debug: bool = False) -> Tuple[List[Fi
     # Try diary table view first (modern Letterboxd)
     films = soup.select("tr.diary-entry-row")
     is_diary_view = len(films) > 0
-    
+
     # Fallback to grid view (older format or /films/ page)
     if not films:
         films = soup.select("li.poster-container, li.posteritem, div.poster-container")
     if not films:
         films = soup.select("ul.poster-list > li, [data-film-slug]")
-    
+
     if debug:
         view_type = "diary table" if is_diary_view else "grid"
         print(f"[DEBUG] Found {len(films)} film containers ({view_type} view)")
         if len(films) == 0:
             content_sample = soup.get_text()[:200]
             print(f"[DEBUG] Text Content Snippet: {content_sample}...")
-    
+
     records: List[FilmRecord] = []
     skipped_no_title = 0
     skipped_no_rating = 0
-    
+
     for film in films:
         title = _extract_title(film)
         if not title:
@@ -254,10 +275,10 @@ def _parse_films_page(soup: BeautifulSoup, debug: bool = False) -> Tuple[List[Fi
             continue
 
         records.append(FilmRecord(title=title, year=year, rating=rating))
-    
+
     if debug:
         print(f"[DEBUG] Parsed {len(records)} rated films, {skipped_no_title} without title, {skipped_no_rating} without rating")
-    
+
     return records, len(films)
 
 
@@ -270,14 +291,21 @@ def _validate_response(response: requests.Response, target_url: str) -> None:
     lower_text = response.text.lower()
     if "this member's profile is private" in lower_text:
         raise LetterboxdScrapeError("Profile is private. Please use a public Letterboxd account.")
-    if "sorry, we can’t find the page" in lower_text or "sorry, we can't find the page" in lower_text:
+    if "sorry, we can't find the page" in lower_text:
         raise LetterboxdScrapeError(f"Letterboxd page not found: {target_url}")
-    
-    # Check for challenge or captcha pages
-    if "just a moment..." in lower_text or "cloudflare" in lower_text and "challenge" in lower_text:
-         raise LetterboxdScrapeError(
-             f"Letterboxd access blocked by bot detection. Try running again in a few minutes or from a different IP."
-         )
+
+    # Check for Cloudflare / bot-detection challenge pages
+    cloudflare_signals = (
+        "just a moment..." in lower_text,
+        ("cloudflare" in lower_text and "challenge" in lower_text),
+        "enable javascript and cookies to continue" in lower_text,
+        "verifying you are human" in lower_text,
+        "please wait while we verify" in lower_text,
+    )
+    if any(cloudflare_signals):
+        raise LetterboxdScrapeError(
+            "Letterboxd access blocked by bot detection. Try again in a few minutes or from a different IP."
+        )
 
 
 def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_data.csv", debug: bool = False) -> pd.DataFrame:
@@ -290,7 +318,7 @@ def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_d
     page = 1
 
     while True:
-        page_url = f"{films_url}/page/{page}/" if page > 1 else f"{films_url}/"
+        page_url = f"{films_url}page/{page}/" if page > 1 else films_url
         try:
             if debug:
                 print(f"[DEBUG] Fetching {page_url}...")
@@ -305,7 +333,7 @@ def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_d
         soup = BeautifulSoup(response.text, "html.parser")
         page_records, film_count = _parse_films_page(soup, debug=debug)
         if debug:
-            print(f"[DEBUG] Page {page}: {film_count} film containers, {len(page_records)} with ratings")
+            print(f"[DEBUG] Page {page}: {film_count} film containers, {len(page_records)} with ratings. Total so far: {len(all_records) + len(page_records)}")
         if film_count == 0:
             break
 

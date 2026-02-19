@@ -65,6 +65,7 @@ def get_recommendations(request: RecommendRequest):
         return RecommendResponse(count=len(recs), recommendations=recs)
 
     except LetterboxdScrapeError as e:
+        print(f"Scrape Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Error: {e}")
