@@ -62,15 +62,14 @@ def _normalize_films_url(profile_or_films_url: str) -> str:
     if parsed.netloc and "letterboxd.com" not in parsed.netloc:
         raise ValueError("Please provide a Letterboxd URL on letterboxd.com.")
     
-    # Use diary view which has ratings in HTML table format
-    # Ensure trailing slash to avoid redirect issues
-    if "/diary" in cleaned:
+    # Prefer /films/ view as it includes all rated movies even if not logged in diary
+    if "/films" in cleaned:
         return cleaned if cleaned.endswith("/") else f"{cleaned}/"
-    elif "/films" in cleaned:
-        new_url = cleaned.replace("/films", "/diary")
-        return new_url if new_url.endswith("/") else f"{new_url}/"
+    elif "/diary" in cleaned:
+        # If user gave /diary, use it, but /films is generally better for missing entries
+        return cleaned if cleaned.endswith("/") else f"{cleaned}/"
     else:
-        return f"{cleaned}/diary/"
+        return f"{cleaned}/films/"
 
 
 def _build_http_session():
@@ -114,7 +113,7 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
     """Extract rating from a film node (works for both grid and table views)."""
     # Try extracting from common rating classes or structures
     rating_node = film_node.select_one(
-        "span.rating[class*='rated-'], td.col-rating span.rating, div.rating-green span.rating, p.poster-viewingdata span.rating, span.rating"
+        "span.rating[class*='rated-'], td.col-rating span.rating, div.rating-green span.rating, p.poster-viewingdata span.rating, span.rating, .rating-stars .rating"
     )
     if rating_node is not None:
         # Try class-based extraction from the matched node
@@ -135,9 +134,17 @@ def _extract_rating(film_node: BeautifulSoup) -> Optional[float]:
         mapped_rating = STAR_MAP.get(rating_raw)
         if mapped_rating is not None:
             return mapped_rating
+            
+    # Check parent or siblings for rating data
+    parent_rating = film_node.select_one(".viewing-rating span.rating")
+    if parent_rating:
+        rating_raw = re.sub(r"\s+", "", parent_rating.get_text(strip=True))
+        mapped_rating = STAR_MAP.get(rating_raw)
+        if mapped_rating is not None:
+            return mapped_rating
 
     # Fallback: check all data-rating attributes on the node itself or its children
-    for attr in ("data-owner-rating", "data-rating", "data-rating-value"):
+    for attr in ("data-owner-rating", "data-rating", "data-rating-value", "data-user-rating"):
         # Check node itself
         raw_rating = (film_node.get(attr) or "").strip()
         parsed = _parse_rating_value(raw_rating)
@@ -215,11 +222,11 @@ def _parse_films_page(soup: BeautifulSoup, debug: bool = False) -> Tuple[List[Fi
     films = soup.select("tr.diary-entry-row")
     is_diary_view = len(films) > 0
     
-    # Fallback to grid view (older format)
+    # Fallback to grid view (older format or /films/ page)
     if not films:
-        films = soup.select("li.poster-container, li.posteritem")
+        films = soup.select("li.poster-container, li.posteritem, div.poster-container")
     if not films:
-        films = soup.select("ul.poster-list > li")
+        films = soup.select("ul.poster-list > li, [data-film-slug]")
     
     if debug:
         view_type = "diary table" if is_diary_view else "grid"
@@ -285,7 +292,11 @@ def scrape_letterboxd_films(profile_or_films_url: str, output_csv: str = "user_d
     while True:
         page_url = f"{films_url}/page/{page}/" if page > 1 else f"{films_url}/"
         try:
+            if debug:
+                print(f"[DEBUG] Fetching {page_url}...")
             response = session.get(page_url, timeout=20)
+            if debug:
+                print(f"[DEBUG] Status: {response.status_code}")
         except RequestException as exc:
             raise LetterboxdScrapeError(f"Network error while accessing Letterboxd: {exc}") from exc
 

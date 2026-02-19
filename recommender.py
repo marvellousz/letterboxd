@@ -52,12 +52,29 @@ def refine_with_vibe(
     tmdb_ids: Dict[int, int],
     tmdb_client: Optional[TMDbClient] = None,
     top_n: int = 5,
+    seen_titles: Optional[List[str]] = None,
 ) -> List[Recommendation]:
     """Refine candidate list by comparing semantic vibe to highly-rated films."""
     candidates = candidates_df.copy().reset_index(drop=True)
-
     favorites = user_history_df.sort_values(by="rating", ascending=False).head(10)
     
+    # 0. Robust filtering of already seen movies by title
+    def normalize(t):
+        return "".join(ch.lower() for ch in str(t) if ch.isalnum()).strip()
+
+    if seen_titles:
+        normalized_seen = {normalize(t) for t in seen_titles}
+        # Also include titles from user_history_df just in case
+        if "title_user" in user_history_df.columns:
+            normalized_seen.update({normalize(t) for t in user_history_df["title_user"]})
+        
+        candidates["norm_title_for_filter"] = candidates["title_clean"].apply(normalize)
+        candidates = candidates[~candidates["norm_title_for_filter"].isin(normalized_seen)]
+        candidates = candidates.drop(columns=["norm_title_for_filter"])
+
+    if candidates.empty:
+        return []
+
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
     candidate_texts = _build_overview_text(candidates).tolist()

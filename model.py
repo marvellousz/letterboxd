@@ -20,6 +20,7 @@ class ModelArtifacts:
     user_history: pd.DataFrame
     candidates: pd.DataFrame
     tmdb_ids: Dict[int, int]  # Mapping from MovieLens ID -> TMDb ID
+    seen_titles: List[str]  # All titles the user has reviewed
 
 
 def _download_movielens(data_dir: str = "data") -> Path:
@@ -285,7 +286,8 @@ def train_and_recommend(
         ratings=ratings, 
         user_history=user_history, 
         candidates=candidates,
-        tmdb_ids=tmdb_mapping
+        tmdb_ids=tmdb_mapping,
+        seen_titles=user_df["title"].tolist()
     )
 
 

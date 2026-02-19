@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #F4F4F0;
+  --color-foreground: #000000;
+
+  --color-main: #FF6B6B;
+  --color-secondary: #4ECDC4;
+  --color-accent: #FFE66D;
+
+  --shadow-neobrutalism: 4px 4px 0px 0px rgba(0, 0, 0, 1);
+  --shadow-neobrutalism-lg: 8px 8px 0px 0px rgba(0, 0, 0, 1);
+  --shadow-neobrutalism-sm: 2px 2px 0px 0px rgba(0, 0, 0, 1);
+
+  --border-width-3: 3px;
+}
+
+:root {
+  --background: #F4F4F0;
+  --foreground: #000000;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
+
+@layer utilities {
+  .neobrutalism-border {
+    @apply border-3 border-black;
+  }
+
+  .neobrutalism-shadow {
+    box-shadow: var(--shadow-neobrutalism);
+  }
+
+  .neobrutalism-shadow-lg {
+    box-shadow: var(--shadow-neobrutalism-lg);
+  }
+
+  .neobrutalism-card {
+    @apply bg-white border-3 border-black p-6 transition-all;
+    box-shadow: var(--shadow-neobrutalism);
+  }
+
+  .neobrutalism-card:hover {
+    box-shadow: var(--shadow-neobrutalism-lg);
+  }
+
+  .neobrutalism-button {
+    @apply border-3 border-black px-4 py-2 font-bold transition-all;
+    box-shadow: var(--shadow-neobrutalism);
+  }
+
+  .neobrutalism-button:hover {
+    @apply -translate-x-0.5 -translate-y-0.5;
+  }
+
+  .neobrutalism-button:active {
+    @apply translate-x-0.5 translate-y-0.5 shadow-none;
+  }
+}
